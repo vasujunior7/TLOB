@@ -68,6 +68,10 @@ python main.py +model={your_model_name} +dataset={dataset_name} hydra.job.chdir=
 7. A checkpoint will be saved in data/checkpoints/ 
 Optionally, you can also log the run with wandb or run a sweep, changing the config experiment options.
 
+# Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=LeonardoBerti00/TLOB&type=date&legend=top-left)](https://www.star-history.com/#LeonardoBerti00/TLOB&type=date&legend=top-left)
+
 # Citation
 ```sh
 @article{berti2025tlob,
