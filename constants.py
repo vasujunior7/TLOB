@@ -8,6 +8,11 @@ class DatasetType(Enum):
     BTC = "BTC"
     
 
+class LossType(Enum):
+    CE = "ce"
+    CB_FOCAL = "cb_focal"
+
+
 class ModelType(Enum):
     MLPLOB = "MLPLOB"
     TLOB = "TLOB"

@@ -11,3 +11,6 @@ data/BTC
 env
 preprocessing/digital*
 data/checkpoints/TLOB/v*
+
+venv
+TLOB_improvements

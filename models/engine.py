@@ -1,5 +1,6 @@
 import random
 from lightning import LightningModule
+from losses.cb_focal_loss import CBFocalLoss # Import CBFocalLoss
 import numpy as np
 from sklearn.metrics import classification_report, precision_recall_curve
 from torch import nn
@@ -34,6 +35,10 @@ class Engine(LightningModule):
         num_heads=8,
         is_sin_emb=True,
         len_test_dataloader=None,
+        loss_type=cst.LossType.CE, # New parameter
+        cb_beta=0.9999,           # New parameter
+        focal_gamma=2.0,          # New parameter
+        class_counts=None,        # New parameter
     ):
         super().__init__()
         self.seq_size = seq_size
@@ -51,10 +56,22 @@ class Engine(LightningModule):
         self.num_layers = num_layers
         self.num_features = num_features
         self.experiment_type = experiment_type
-        self.model = pick_model(model_type, hidden_dim, num_layers, seq_size, num_features, num_heads, is_sin_emb, dataset_type) 
+        self.loss_type = loss_type # Store loss type
+        self.cb_beta = cb_beta
+        self.focal_gamma = focal_gamma
+        self.class_counts = class_counts
+
+        self.model = pick_model(model_type, hidden_dim, num_layers, seq_size, num_features, num_heads, is_sin_emb, dataset_type)
         self.ema = ExponentialMovingAverage(self.parameters(), decay=0.999)
         self.ema.to(cst.DEVICE)
-        self.loss_function = nn.CrossEntropyLoss()
+
+        if self.loss_type == cst.LossType.CB_FOCAL:
+            if self.class_counts is None:
+                raise ValueError("class_counts must be provided for CBFocalLoss")
+            self.loss_function = CBFocalLoss(self.class_counts, self.cb_beta, self.focal_gamma, num_classes=3)
+        else:
+            self.loss_function = nn.CrossEntropyLoss()
+
         self.train_losses = []
         self.val_losses = []
         self.test_losses = []

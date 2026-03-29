@@ -70,6 +70,9 @@ class BTC(Dataset):
     testing_stocks: list = field(default_factory=lambda: ["BTC"])
 
 @dataclass
+
+
+@dataclass
 class Experiment:
     is_data_preprocessed: bool = False
     is_wandb: bool = True
@@ -82,6 +85,10 @@ class Experiment:
     max_epochs: int = 10
     dir_ckpt: str = "model.ckpt"
     optimizer: str = "Adam"
+    loss_type: LossType = LossType.CE
+    cb_beta: float = 0.9999
+    focal_gamma: float = 2.0
+    use_ofi_bias: bool = False
     
 defaults = [Model, Experiment, Dataset]
 

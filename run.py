@@ -15,7 +15,7 @@ from preprocessing.lobster import lobster_load
 from preprocessing.btc import btc_load
 from preprocessing.dataset import Dataset, DataModule
 import constants as cst
-from constants import DatasetType, SamplingType
+from constants import DatasetType, SamplingType, LossType
 torch.serialization.add_safe_globals([omegaconf.listconfig.ListConfig])
 
 
@@ -54,6 +54,8 @@ def train(config: Config, trainer: L.Trainer, run=None):
     checkpoint_ref = config.experiment.checkpoint_reference
     checkpoint_path = os.path.join(cst.DIR_SAVED_MODEL, model_type.value, checkpoint_ref)
     dataset_type = config.dataset.type.value
+    train_input, train_labels, val_input, val_labels, test_input, test_labels = None, None, None, None, None, None
+
     if dataset_type == "FI_2010":
         path = cst.DATA_DIR + "/FI_2010"
         train_input, train_labels, val_input, val_labels, test_input, test_labels = fi_2010_load(path, seq_size, horizon, config.model.hyperparameters_fixed["all_features"])
@@ -73,10 +75,10 @@ def train(config: Config, trainer: L.Trainer, run=None):
             num_workers=4
         )
         test_loaders = [data_module.test_dataloader()]
-    
+
     elif dataset_type == "BTC":
         train_input, train_labels = btc_load(cst.DATA_DIR + "/BTC/train.npy", cst.LEN_SMOOTH, horizon, seq_size)
-        val_input, val_labels = btc_load(cst.DATA_DIR + "/BTC/val.npy", cst.LEN_SMOOTH, horizon, seq_size)  
+        val_input, val_labels = btc_load(cst.DATA_DIR + "/BTC/val.npy", cst.LEN_SMOOTH, horizon, seq_size)
         test_input, test_labels = btc_load(cst.DATA_DIR + "/BTC/test.npy", cst.LEN_SMOOTH, horizon, seq_size)
         train_set = Dataset(train_input, train_labels, seq_size)
         val_set = Dataset(val_input, val_labels, seq_size)
@@ -92,10 +94,10 @@ def train(config: Config, trainer: L.Trainer, run=None):
             batch_size=config.dataset.batch_size,
             test_batch_size=config.dataset.batch_size*4,
             num_workers=4
-        ) 
+        )
 
         test_loaders = [data_module.test_dataloader()]
-        
+
     elif dataset_type == "LOBSTER":
         training_stocks = config.dataset.training_stocks
         testing_stocks = config.dataset.testing_stocks
@@ -137,7 +139,7 @@ def train(config: Config, trainer: L.Trainer, run=None):
                 persistent_workers=True
             )
             test_loaders.append(test_dataloader)
-        
+
         train_set = Dataset(train_input, train_labels, seq_size)
         val_set = Dataset(val_input, val_labels, seq_size)
         if config.experiment.is_debug:
@@ -153,7 +155,10 @@ def train(config: Config, trainer: L.Trainer, run=None):
         )
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
-    
+
+    # Calculate class counts from training labels
+    class_counts = torch.unique(train_labels, return_counts=True)[1].float()
+
     counts_train = torch.unique(train_labels, return_counts=True)
     counts_val = torch.unique(val_labels, return_counts=True)
     counts_test = torch.unique(test_labels, return_counts=True)
@@ -165,13 +170,13 @@ def train(config: Config, trainer: L.Trainer, run=None):
     print(f"Classes distribution in val set: up {(counts_val[1][0].item()/val_labels.shape[0]):.2f} stat {(counts_val[1][1].item()/val_labels.shape[0]):.2f} down {(counts_val[1][2].item()/val_labels.shape[0]):.2f} ", )
     print(f"Classes distribution in test set: up {(counts_test[1][0].item()/test_labels.shape[0]):.2f} stat {(counts_test[1][1].item()/test_labels.shape[0]):.2f} down {(counts_test[1][2].item()/test_labels.shape[0]):.2f} ", )
     print()
-    
+
     experiment_type = config.experiment.type
     if "FINETUNING" in experiment_type or "EVALUATION" in experiment_type:
         if checkpoint_ref != "":
             checkpoint = torch.load(checkpoint_path, map_location=cst.DEVICE, weights_only=True)
-            
-        print("Loading model from checkpoint: ", config.experiment.checkpoint_reference) 
+
+        print("Loading model from checkpoint: ", config.experiment.checkpoint_reference)
         lr = checkpoint["hyper_parameters"]["lr"]
         dir_ckpt = checkpoint["hyper_parameters"]["dir_ckpt"]
         hidden_dim = checkpoint["hyper_parameters"]["hidden_dim"]
@@ -181,9 +186,13 @@ def train(config: Config, trainer: L.Trainer, run=None):
         max_epochs = checkpoint["hyper_parameters"]["max_epochs"]
         horizon = checkpoint["hyper_parameters"]["horizon"]
         seq_size = checkpoint["hyper_parameters"]["seq_size"]
+        loss_type = checkpoint["hyper_parameters"]["loss_type"]
+        cb_beta = checkpoint["hyper_parameters"]["cb_beta"]
+        focal_gamma = checkpoint["hyper_parameters"]["focal_gamma"]
+        use_ofi_bias = checkpoint["hyper_parameters"]["use_ofi_bias"]
         if model_type == "MLPLOB":
             model = Engine.load_from_checkpoint(
-                checkpoint_path, 
+                checkpoint_path,
                 seq_size=seq_size,
                 horizon=horizon,
                 max_epochs=max_epochs,
@@ -198,6 +207,11 @@ def train(config: Config, trainer: L.Trainer, run=None):
                 num_features=train_input.shape[1],
                 dataset_type=dataset_type,
                 map_location=cst.DEVICE,
+                loss_type=loss_type,
+                cb_beta=cb_beta,
+                focal_gamma=focal_gamma,
+                class_counts=class_counts,
+                use_ofi_bias=use_ofi_bias
                 )
         elif model_type == "TLOB":
             model = Engine.load_from_checkpoint(
@@ -218,11 +232,16 @@ def train(config: Config, trainer: L.Trainer, run=None):
                 num_heads=checkpoint["hyper_parameters"]["num_heads"],
                 is_sin_emb=checkpoint["hyper_parameters"]["is_sin_emb"],
                 map_location=cst.DEVICE,
-                len_test_dataloader=len(test_loaders[0])
+                len_test_dataloader=len(test_loaders[0]),
+                loss_type=loss_type,
+                cb_beta=cb_beta,
+                focal_gamma=focal_gamma,
+                class_counts=class_counts,
+                use_ofi_bias=use_ofi_bias
                 )
         elif model_type == "BINCTABL":
             model = Engine.load_from_checkpoint(
-                checkpoint_path, 
+                checkpoint_path,
                 seq_size=seq_size,
                 horizon=horizon,
                 max_epochs=max_epochs,
@@ -235,11 +254,16 @@ def train(config: Config, trainer: L.Trainer, run=None):
                 num_features=train_input.shape[1],
                 dataset_type=dataset_type,
                 map_location=cst.DEVICE,
-                len_test_dataloader=len(test_loaders[0])
+                len_test_dataloader=len(test_loaders[0]),
+                loss_type=loss_type,
+                cb_beta=cb_beta,
+                focal_gamma=focal_gamma,
+                class_counts=class_counts,
+                use_ofi_bias=use_ofi_bias
                 )
         elif model_type == "DEEPLOB":
             model = Engine.load_from_checkpoint(
-                checkpoint_path, 
+                checkpoint_path,
                 seq_size=seq_size,
                 horizon=horizon,
                 max_epochs=max_epochs,
@@ -252,9 +276,14 @@ def train(config: Config, trainer: L.Trainer, run=None):
                 num_features=train_input.shape[1],
                 dataset_type=dataset_type,
                 map_location=cst.DEVICE,
-                len_test_dataloader=len(test_loaders[0])
+                len_test_dataloader=len(test_loaders[0]),
+                loss_type=loss_type,
+                cb_beta=cb_beta,
+                focal_gamma=focal_gamma,
+                class_counts=class_counts,
+                use_ofi_bias=use_ofi_bias
                 )
-              
+
     else:
         if model_type == cst.ModelType.MLPLOB:
             model = Engine(
@@ -271,7 +300,12 @@ def train(config: Config, trainer: L.Trainer, run=None):
                 num_layers=config.model.hyperparameters_fixed["num_layers"],
                 num_features=train_input.shape[1],
                 dataset_type=dataset_type,
-                len_test_dataloader=len(test_loaders[0])
+                len_test_dataloader=len(test_loaders[0]),
+                loss_type=config.experiment.loss_type,
+                cb_beta=config.experiment.cb_beta,
+                focal_gamma=config.experiment.focal_gamma,
+                class_counts=class_counts,
+                use_ofi_bias=config.experiment.use_ofi_bias
             )
         elif model_type == cst.ModelType.TLOB:
             model = Engine(
@@ -290,7 +324,12 @@ def train(config: Config, trainer: L.Trainer, run=None):
                 dataset_type=dataset_type,
                 num_heads=config.model.hyperparameters_fixed["num_heads"],
                 is_sin_emb=config.model.hyperparameters_fixed["is_sin_emb"],
-                len_test_dataloader=len(test_loaders[0])
+                len_test_dataloader=len(test_loaders[0]),
+                loss_type=config.experiment.loss_type,
+                cb_beta=config.experiment.cb_beta,
+                focal_gamma=config.experiment.focal_gamma,
+                class_counts=class_counts,
+                use_ofi_bias=config.experiment.use_ofi_bias
             )
         elif model_type == cst.ModelType.BINCTABL:
             model = Engine(
@@ -303,9 +342,16 @@ def train(config: Config, trainer: L.Trainer, run=None):
                 lr=config.model.hyperparameters_fixed["lr"],
                 optimizer=config.experiment.optimizer,
                 dir_ckpt=config.experiment.dir_ckpt,
+                hidden_dim=config.model.hyperparameters_fixed["hidden_dim"],
+                num_layers=config.model.hyperparameters_fixed["num_layers"],
                 num_features=train_input.shape[1],
                 dataset_type=dataset_type,
-                len_test_dataloader=len(test_loaders[0])
+                len_test_dataloader=len(test_loaders[0]),
+                loss_type=config.experiment.loss_type,
+                cb_beta=config.experiment.cb_beta,
+                focal_gamma=config.experiment.focal_gamma,
+                class_counts=class_counts,
+                use_ofi_bias=config.experiment.use_ofi_bias
             )
         elif model_type == cst.ModelType.DEEPLOB:
             model = Engine(
@@ -318,21 +364,28 @@ def train(config: Config, trainer: L.Trainer, run=None):
                 lr=config.model.hyperparameters_fixed["lr"],
                 optimizer=config.experiment.optimizer,
                 dir_ckpt=config.experiment.dir_ckpt,
+                hidden_dim=config.model.hyperparameters_fixed["hidden_dim"],
+                num_layers=config.model.hyperparameters_fixed["num_layers"],
                 num_features=train_input.shape[1],
                 dataset_type=dataset_type,
-                len_test_dataloader=len(test_loaders[0])
+                len_test_dataloader=len(test_loaders[0]),
+                loss_type=config.experiment.loss_type,
+                cb_beta=config.experiment.cb_beta,
+                focal_gamma=config.experiment.focal_gamma,
+                class_counts=class_counts,
+                use_ofi_bias=config.experiment.use_ofi_bias
             )
-    
-    print("total number of parameters: ", sum(p.numel() for p in model.parameters()))   
+
+    print("total number of parameters: ", sum(p.numel() for p in model.parameters()))
     train_dataloader, val_dataloader = data_module.train_dataloader(), data_module.val_dataloader()
-    
+
     if "TRAINING" in experiment_type or "FINETUNING" in experiment_type:
         trainer.fit(model, train_dataloader, val_dataloader)
         best_model_path = model.last_path_ckpt
-        print("Best model path: ", best_model_path) 
+        print("Best model path: ", best_model_path)
         try:
             best_model = Engine.load_from_checkpoint(best_model_path, map_location=cst.DEVICE)
-        except: 
+        except:
             print("no checkpoints has been saved, selecting the last model")
             best_model = model
         best_model.experiment_type = "EVALUATION"
@@ -351,8 +404,7 @@ def train(config: Config, trainer: L.Trainer, run=None):
                 run.log({f"f1 {testing_stocks[i]} best": output[0]["f1_score"]}, commit=False)
             elif run is not None and dataset_type == "FI_2010":
                 run.log({f"f1 FI_2010 ": output[0]["f1_score"]}, commit=False)
-            
-    
+
 
 def run_wandb(config: Config, accelerator):
     def wandb_sweep_callback():
@@ -371,7 +423,7 @@ def run_wandb(config: Config, accelerator):
                     run_name += str(param[:2]) + "_" + str(value.value) + "_"
 
         run = wandb.init(project=cst.PROJECT_NAME, name=run_name, entity="") # set entity to your wandb username
-        
+
         if config.experiment.is_sweep:
             model_params = run.config
         else:
@@ -393,7 +445,7 @@ def run_wandb(config: Config, accelerator):
         else:
             config.experiment.dir_ckpt = f"{dataset}_seq_size_{seq_size}_horizon_{horizon}_seed_{seed}"
         wandb_instance_name = config.experiment.dir_ckpt
-            
+
         trainer = L.Trainer(
             accelerator=accelerator,
             precision=cst.PRECISION,
@@ -427,8 +479,8 @@ def run_wandb(config: Config, accelerator):
         run.finish()
 
     return wandb_sweep_callback
-  
-    
+
+
 def sweep_init(config: Config):
     # put your wandb key here
     wandb.login("")
@@ -463,8 +515,7 @@ def print_setup(config: Config):
     print("Is wandb: ", config.experiment.is_wandb)
     print("Is sweep: ", config.experiment.is_sweep)
     print(config.experiment.type)
-    print("Is debug: ", config.experiment.is_debug) 
+    print("Is debug: ", config.experiment.is_debug)
     if config.dataset.type == cst.DatasetType.LOBSTER:
         print("Training stocks: ", config.dataset.training_stocks)
         print("Testing stocks: ", config.dataset.testing_stocks)
-
